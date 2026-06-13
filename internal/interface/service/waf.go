@@ -16,6 +16,9 @@ type Response struct {
 type Keywords struct {
 	CommandInjectionKeywords []string `yaml:"command_injection"`
 	PathTraversalKeywords    []string `yaml:"path_traversal"`
+	SensitivePathKeywords    []string `yaml:"sensitive_paths"`
+	KnownWebshellKeywords    []string `yaml:"known_webshells"`
+	ScannerUserAgentKeywords []string `yaml:"scanner_user_agents"`
 }
 
 type WAFInterface interface {

@@ -16,3 +16,45 @@ path_traversal:
   - "%2E%2E%2F"
   - "%2E%2E%5C"
   - "%3Cscript%3E"
+
+# Sensitive files and directories — stack-agnostic.
+sensitive_paths:
+  - "/.env"
+  - "/.git/"
+  - "/.git/config"
+  - "/.git/HEAD"
+  - "/docker-compose"
+  - "/Dockerfile"
+  - "/phpunit"
+  - "/vendor/phpunit"
+  - "/etc/passwd"
+  - "/etc/shadow"
+  - "/proc/self"
+  - "/var/log/"
+  - "/serverless"
+  - "/vercel.json"
+
+# Known malware/backdoor filenames observed in active scans.
+known_webshells:
+  - "/ioxi-o.php"
+  - "/adminfuns.php"
+  - "/classwithtostring.php"
+  - "/wikindex.php"
+  - "/old-index.php"
+  - "/shell.php"
+  - "/wso.php"
+  - "/alfa.php"
+  - "/c99.php"
+  - "/r57.php"
+  - "/bypass.php"
+  - "/up.php"
+
+# Automated scanners and spoofed clients — tune per deployment.
+scanner_user_agents:
+  - "Mozlila/"
+  - "TLM-Audit-Scanner"
+  - "iaudit/"
+  - "SecurityScanner/"
+  - "zgrab/"
+  - "ModatScanner"
+  - "ThreatView"

@@ -4,7 +4,7 @@ import (
 	"log"
 	"os"
 	"strings"
-	"sync"
+	"sync/atomic"
 
 	"github.com/corazawaf/libinjection-go"
 	"github.com/jahrulnr/go-waf/config"
@@ -18,6 +18,9 @@ type WAFService struct {
 
 	commandInjectionKeywords []string
 	pathTraversalKeywords    []string
+	sensitivePathKeywords    []string
+	knownWebshellKeywords    []string
+	scannerUserAgentKeywords []string
 }
 
 func NewWAFService(config *config.Config, keywordsFile string) service.WAFInterface {
@@ -28,6 +31,9 @@ func NewWAFService(config *config.Config, keywordsFile string) service.WAFInterf
 
 		commandInjectionKeywords: keywords.CommandInjectionKeywords,
 		pathTraversalKeywords:    keywords.PathTraversalKeywords,
+		sensitivePathKeywords:    keywords.SensitivePathKeywords,
+		knownWebshellKeywords:    keywords.KnownWebshellKeywords,
+		scannerUserAgentKeywords: keywords.ScannerUserAgentKeywords,
 	}
 }
 
@@ -47,69 +53,59 @@ func loadKeywords(filename string) service.Keywords {
 }
 
 func (w *WAFService) HandleRequest(request *service.Request) (*service.Response, error) {
-	var headerThreatDetected, bodyThreatDetected bool
-	var wg sync.WaitGroup
+	var headerThreat, bodyThreat atomic.Bool
 
-	// Check for header threats
 	if w.config.WAF_PROTECT_HEADER {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			headerThreatDetected = w.DetectHeaderThreats(request)
-		}()
+		headerThreat.Store(w.DetectHeaderThreats(request))
 	}
 
-	// Check for body threats
 	if w.config.WAF_PROTECT_BODY {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			bodyThreatDetected = w.DetectBodyThreats(request)
-		}()
+		bodyThreat.Store(w.DetectBodyThreats(request))
 	}
 
-	// Wait for all checks to complete
-	wg.Wait()
-
-	// If any threats are detected, return a 403 response
-	if headerThreatDetected || bodyThreatDetected {
+	if headerThreat.Load() || bodyThreat.Load() {
 		return &service.Response{StatusCode: 403, Body: []byte("Threat Detected")}, nil
 	}
 
-	// Return a successful response if no threats are detected
 	return nil, nil
 }
 
 func (w *WAFService) DetectHeaderThreats(request *service.Request) bool {
-	// Check for SQL injection patterns in headers
+	if matched, rule := w.detectPathThreats(request.Path); matched {
+		w.logThreat(request, "path", rule)
+		return true
+	}
+
+	if ua := request.Headers["User-Agent"]; ua != "" {
+		if matched, rule := matchKeywordFold(ua, w.scannerUserAgentKeywords); matched {
+			w.logThreat(request, "scanner_user_agent", rule)
+			return true
+		}
+	}
+
 	for _, value := range request.Headers {
 		if injection, _ := libinjection.IsSQLi(value); injection {
+			w.logThreat(request, "sqli", value)
 			return true
 		}
 	}
 
-	// Check for XSS patterns in headers
 	for _, value := range request.Headers {
 		if libinjection.IsXSS(value) {
+			w.logThreat(request, "xss", value)
 			return true
 		}
 	}
 
-	// Check for command injection patterns in headers
-	for _, pattern := range w.commandInjectionKeywords {
+	for _, keywords := range [][]string{
+		w.commandInjectionKeywords,
+		w.pathTraversalKeywords,
+		w.sensitivePathKeywords,
+		w.knownWebshellKeywords,
+	} {
 		for _, value := range request.Headers {
-			if strings.Contains(value, pattern) {
-				logger.Logger("Threat Detected", pattern).Warn()
-				return true
-			}
-		}
-	}
-
-	// Check for path traversal patterns in headers (if applicable)
-	for _, pattern := range w.pathTraversalKeywords {
-		for _, value := range request.Headers {
-			if strings.Contains(value, pattern) {
-				logger.Logger("Threat Detected", pattern).Warn()
+			if matched, rule := matchKeyword(value, keywords); matched {
+				w.logThreat(request, "keyword", rule)
 				return true
 			}
 		}
@@ -119,33 +115,66 @@ func (w *WAFService) DetectHeaderThreats(request *service.Request) bool {
 }
 
 func (w *WAFService) DetectBodyThreats(request *service.Request) bool {
-	// Check for SQL injection patterns in headers
-	if injection, _ := libinjection.IsSQLi(string(request.Body)); injection {
-		logger.Logger("Threat Detected (SQL Injection)", string(request.Body)).Warn()
+	body := string(request.Body)
+
+	if injection, _ := libinjection.IsSQLi(body); injection {
+		w.logThreat(request, "sqli_body", body)
 		return true
 	}
 
-	// Check for XSS patterns in headers
-	if libinjection.IsXSS(string(request.Body)) {
-		logger.Logger("Threat Detected (XSS Attact)", string(request.Body)).Warn()
+	if libinjection.IsXSS(body) {
+		w.logThreat(request, "xss_body", body)
 		return true
 	}
 
-	// Check for command injection patterns
-	for _, pattern := range w.commandInjectionKeywords {
-		if strings.Contains(string(request.Body), pattern) {
-			logger.Logger("Threat Detected", pattern).Warn()
-			return true
-		}
-	}
-
-	// Check for path traversal patterns
-	for _, pattern := range w.pathTraversalKeywords {
-		if strings.Contains(string(request.Body), pattern) {
-			logger.Logger("Threat Detected", pattern).Warn()
+	for _, keywords := range [][]string{
+		w.commandInjectionKeywords,
+		w.pathTraversalKeywords,
+		w.sensitivePathKeywords,
+		w.knownWebshellKeywords,
+	} {
+		if matched, rule := matchKeyword(body, keywords); matched {
+			w.logThreat(request, "keyword_body", rule)
 			return true
 		}
 	}
 
 	return false
+}
+
+func (w *WAFService) detectPathThreats(path string) (bool, string) {
+	if matched, rule := matchKeywordFold(path, w.sensitivePathKeywords); matched {
+		return true, rule
+	}
+
+	if matched, rule := matchKeywordFold(path, w.knownWebshellKeywords); matched {
+		return true, rule
+	}
+
+	return false, ""
+}
+
+func matchKeyword(text string, patterns []string) (bool, string) {
+	for _, pattern := range patterns {
+		if pattern != "" && strings.Contains(text, pattern) {
+			return true, pattern
+		}
+	}
+
+	return false, ""
+}
+
+func matchKeywordFold(text string, patterns []string) (bool, string) {
+	lowerText := strings.ToLower(text)
+	for _, pattern := range patterns {
+		if pattern != "" && strings.Contains(lowerText, strings.ToLower(pattern)) {
+			return true, pattern
+		}
+	}
+
+	return false, ""
+}
+
+func (w *WAFService) logThreat(request *service.Request, kind, detail string) {
+	logger.Logger("WAF block", kind, request.IP, request.Path, detail).Warn()
 }

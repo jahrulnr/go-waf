@@ -3,16 +3,17 @@ package http_reverseproxy_handler
 import (
 	"sync"
 
+	"github.com/gin-gonic/gin"
 	"github.com/jahrulnr/go-waf/config"
 	"github.com/jahrulnr/go-waf/internal/interface/service"
-
-	"github.com/gin-gonic/gin"
+	"golang.org/x/sync/singleflight"
 )
 
 type Handler struct {
-	config      *config.Config
-	cacheDriver service.CacheInterface
-	mu          sync.Mutex
+	config          *config.Config
+	cacheDriver     service.CacheInterface
+	mu              sync.Mutex
+	cacheBuildGroup singleflight.Group
 }
 
 type CacheHandler struct {

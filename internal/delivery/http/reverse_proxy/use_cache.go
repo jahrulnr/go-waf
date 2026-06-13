@@ -11,59 +11,94 @@ import (
 )
 
 // cacheResponse caches the response data using MessagePack.
-func (h *Handler) cacheResponse(c *gin.Context, url string, headers http.Header, body []byte) {
+func (h *Handler) cacheResponse(c *gin.Context, url string, headers http.Header, body []byte) []byte {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if deviceKey := h.getDeviceKey(c); deviceKey != "" {
-		h.cacheDriver.SetKey(deviceKey)
-	}
+	h.applyCacheDeviceKey(c)
 
 	cacheData := &CacheHandler{
 		CacheURL:     url,
 		CacheHeaders: headers,
 		CacheData:    body,
 	}
-	data, err := msgpack.Marshal(cacheData) // Use MessagePack for serialization
+	data, err := msgpack.Marshal(cacheData)
 	if err != nil {
 		logger.Logger("[error] Failed to marshal cache data: ", err).Error()
-		return
+		return nil
 	}
 
 	logger.Logger("[debug]", "Set new cache "+url).Debug()
 	h.cacheDriver.Set(url, data, time.Duration(h.config.CACHE_TTL)*time.Second)
+	return data
 }
 
-// UseCache retrieves cached data or fetches it if not found.
-func (h *Handler) UseCache(c *gin.Context) {
-	url := h.config.HOST_DESTINATION + c.Request.URL.String()
-
-	if deviceKey := h.getDeviceKey(c); deviceKey != "" {
+func (h *Handler) applyCacheDeviceKey(c *gin.Context) string {
+	deviceKey := h.getDeviceKey(c)
+	if deviceKey != "" {
 		h.cacheDriver.SetKey(deviceKey)
 	}
+	return deviceKey
+}
 
-	getCache, ok := h.cacheDriver.Get(url)
-	if !ok {
-		logger.Logger("[debug] cache not found", url).Debug()
+func (h *Handler) cacheFlightKey(url, deviceKey string) string {
+	if deviceKey == "" {
+		return url
+	}
+	return deviceKey + "\x00" + url
+}
+
+// UseCache retrieves cached data or builds it once per key under concurrent misses.
+func (h *Handler) UseCache(c *gin.Context) {
+	url := h.config.HOST_DESTINATION + c.Request.URL.String()
+	deviceKey := h.applyCacheDeviceKey(c)
+
+	if getCache, ok := h.cacheDriver.Get(url); ok {
+		h.serveCachedResponse(c, url, getCache)
+		return
+	}
+
+	logger.Logger("[debug] cache not found", url).Debug()
+
+	flightKey := h.cacheFlightKey(url, deviceKey)
+	result, err, _ := h.cacheBuildGroup.Do(flightKey, func() (interface{}, error) {
+		h.applyCacheDeviceKey(c)
+
+		if getCache, ok := h.cacheDriver.Get(url); ok {
+			return getCache, nil
+		}
+
+		return h.fetchAndCache(c, url)
+	})
+	if err != nil {
+		logger.Logger("[error] cache build failed, fallback to proxy: ", err).Error()
 		h.FetchData(c)
 		return
 	}
 
+	cacheBytes, ok := result.([]byte)
+	if !ok || len(cacheBytes) == 0 {
+		h.FetchData(c)
+		return
+	}
+
+	h.serveCachedResponse(c, url, cacheBytes)
+}
+
+func (h *Handler) serveCachedResponse(c *gin.Context, url string, getCache []byte) {
 	var cacheData CacheHandler
-	if err := msgpack.Unmarshal(getCache, &cacheData); err != nil { // Use MessagePack for deserialization
+	if err := msgpack.Unmarshal(getCache, &cacheData); err != nil {
 		logger.Logger("[error] Failed to unmarshal cache data: ", err).Error()
 		go h.cacheDriver.Remove(url)
 		h.FetchData(c)
 		return
 	}
 
-	// Set headers from cacheData
 	for key, headers := range cacheData.CacheHeaders {
 		if len(headers) > 0 {
 			c.Header(key, headers[0])
 		}
 	}
 
-	// Check and manage TTL
 	ttl, _ := h.cacheDriver.GetTTL(url)
 	ttl = time.Duration(h.config.CACHE_TTL) - (ttl / time.Second)
 	go func() {
@@ -72,7 +107,6 @@ func (h *Handler) UseCache(c *gin.Context) {
 		}
 	}()
 
-	// Manage headers
 	if h.config.ENABLE_GZIP {
 		c.Header("Accept-Encoding", "")
 		c.Header("Vary", "")
@@ -83,6 +117,5 @@ func (h *Handler) UseCache(c *gin.Context) {
 	c.Header("X-Cache", "HIT")
 	c.Header("X-Age", fmt.Sprintf("%d", ttl))
 
-	// Send cached data
 	c.Data(http.StatusOK, c.GetHeader("Content-Type"), cacheData.CacheData)
 }
