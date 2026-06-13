@@ -70,6 +70,15 @@ func (h *Handler) FetchData(c *gin.Context) {
 			r.Header.Del("Vary")
 		}
 
+		etag := h.applyETag(r.Header, body)
+		if etagMatches(c.GetHeader("If-None-Match"), etag) {
+			r.StatusCode = http.StatusNotModified
+			r.Body = http.NoBody
+			r.ContentLength = 0
+			r.Header.Del("Content-Length")
+			return nil
+		}
+
 		// Cache the response if applicable
 		if h.config.USE_CACHE && (c.Request.Method == "GET" || c.Request.Method == "HEAD") && !strings.Contains(r.Header.Get("Cache-Control"), "no-cache") {
 			h.cacheResponse(c, r.Request.URL.String(), r.Header, body)

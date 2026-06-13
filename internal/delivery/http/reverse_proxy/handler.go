@@ -20,6 +20,7 @@ type CacheHandler struct {
 	CacheURL     string              `json:"url"`
 	CacheHeaders map[string][]string `json:"headers"`
 	CacheData    []byte              `json:"data"`
+	CacheETag    string              `json:"etag"`
 }
 
 // NewHttpHandler initializes a new HTTP handler with the given configuration and cache driver.

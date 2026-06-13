@@ -16,10 +16,13 @@ func (h *Handler) cacheResponse(c *gin.Context, url string, headers http.Header,
 	defer h.mu.Unlock()
 	h.applyCacheDeviceKey(c)
 
+	etag := h.applyETag(headers, body)
+
 	cacheData := &CacheHandler{
 		CacheURL:     url,
 		CacheHeaders: headers,
 		CacheData:    body,
+		CacheETag:    etag,
 	}
 	data, err := msgpack.Marshal(cacheData)
 	if err != nil {
@@ -99,6 +102,14 @@ func (h *Handler) serveCachedResponse(c *gin.Context, url string, getCache []byt
 		}
 	}
 
+	etag := cacheData.CacheETag
+	if etag == "" {
+		etag = resolveETag(cacheData.CacheHeaders, cacheData.CacheData)
+	}
+	if etag != "" {
+		c.Header("ETag", etag)
+	}
+
 	ttl, _ := h.cacheDriver.GetTTL(url)
 	ttl = time.Duration(h.config.CACHE_TTL) - (ttl / time.Second)
 	go func() {
@@ -116,6 +127,16 @@ func (h *Handler) serveCachedResponse(c *gin.Context, url string, getCache []byt
 	c.Header("X-Varnish", "")
 	c.Header("X-Cache", "HIT")
 	c.Header("X-Age", fmt.Sprintf("%d", ttl))
+
+	if etagMatches(c.GetHeader("If-None-Match"), etag) {
+		c.Status(http.StatusNotModified)
+		return
+	}
+
+	if c.Request.Method == http.MethodHead {
+		c.Status(http.StatusOK)
+		return
+	}
 
 	c.Data(http.StatusOK, c.GetHeader("Content-Type"), cacheData.CacheData)
 }
