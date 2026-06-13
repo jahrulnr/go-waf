@@ -9,7 +9,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -54,13 +53,26 @@ func (h *Handler) FetchData(c *gin.Context) {
 		}
 
 		body := bodyBuffer.Bytes()
+		if len(body) == 0 && c.Request.Method == http.MethodHead {
+			if fetched, err := h.fetchBackendGETBody(c, h.backendURL(c, remote)); err == nil {
+				body = fetched
+			}
+		}
+
 		scheme := publicScheme(c)
+		if len(body) > 0 {
+			body = bytes.ReplaceAll(body, []byte(h.config.HOST_DESTINATION), []byte(fmt.Sprintf("%s://%s", scheme, c.Request.Host)))
+		}
 
-		body = bytes.ReplaceAll(body, []byte(h.config.HOST_DESTINATION), []byte(fmt.Sprintf("%s://%s", scheme, c.Request.Host)))
-
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		r.ContentLength = int64(len(body))
-		r.Header.Set("Content-Length", strconv.Itoa(len(body)))
+		if c.Request.Method == http.MethodHead {
+			r.Body = http.NoBody
+			r.ContentLength = 0
+			r.Header.Del("Content-Length")
+		} else {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
+			r.Header.Set("Content-Length", strconv.Itoa(len(body)))
+		}
 
 		if h.config.ENABLE_GZIP {
 			r.Header.Del("Accept-Encoding")
@@ -77,7 +89,7 @@ func (h *Handler) FetchData(c *gin.Context) {
 		}
 
 		// Cache the response if applicable
-		if h.config.USE_CACHE && (c.Request.Method == "GET" || c.Request.Method == "HEAD") && !strings.Contains(r.Header.Get("Cache-Control"), "no-cache") {
+		if h.config.USE_CACHE && (c.Request.Method == "GET" || c.Request.Method == "HEAD") && isExternallyCacheable(r.Header.Get("Cache-Control")) {
 			h.cacheResponse(c, r.Request.URL.String(), r.Header, body)
 			r.Header.Set("X-Cache", "MISS")
 		}
@@ -95,7 +107,12 @@ func (h *Handler) FetchData(c *gin.Context) {
 }
 
 func (h *Handler) fetchAndCache(c *gin.Context, backendURL string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, backendURL, nil)
+	method := c.Request.Method
+	if method == http.MethodHead {
+		method = http.MethodGet
+	}
+
+	req, err := http.NewRequestWithContext(c.Request.Context(), method, backendURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +137,7 @@ func (h *Handler) fetchAndCache(c *gin.Context, backendURL string) ([]byte, erro
 		return nil, fmt.Errorf("backend returned status %d", resp.StatusCode)
 	}
 
-	if strings.Contains(resp.Header.Get("Cache-Control"), "no-cache") {
+	if !isExternallyCacheable(resp.Header.Get("Cache-Control")) {
 		return nil, fmt.Errorf("backend response is not cacheable")
 	}
 
