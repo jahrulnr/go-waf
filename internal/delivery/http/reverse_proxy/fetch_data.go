@@ -32,7 +32,7 @@ func (h *Handler) FetchData(c *gin.Context) {
 
 	proxy := httputil.NewSingleHostReverseProxy(remote)
 	proxy.Director = func(req *http.Request) {
-		req.Header = c.Request.Header
+		req.Header = backendRequestHeaders(c)
 		req.Host = host
 		req.URL.Scheme = remote.Scheme
 		req.URL.Host = remote.Host
@@ -54,10 +54,7 @@ func (h *Handler) FetchData(c *gin.Context) {
 		}
 
 		body := bodyBuffer.Bytes()
-		scheme := c.Request.URL.Scheme
-		if scheme == "" {
-			scheme = "http"
-		}
+		scheme := publicScheme(c)
 
 		body = bytes.ReplaceAll(body, []byte(h.config.HOST_DESTINATION), []byte(fmt.Sprintf("%s://%s", scheme, c.Request.Host)))
 
@@ -103,7 +100,7 @@ func (h *Handler) fetchAndCache(c *gin.Context, backendURL string) ([]byte, erro
 		return nil, err
 	}
 
-	req.Header = c.Request.Header.Clone()
+	req.Header = backendRequestHeaders(c)
 	req.Header.Del("Accept-Encoding")
 
 	host := h.config.HOST
@@ -133,10 +130,7 @@ func (h *Handler) fetchAndCache(c *gin.Context, backendURL string) ([]byte, erro
 	}
 
 	body := bodyBuffer.Bytes()
-	scheme := c.Request.URL.Scheme
-	if scheme == "" {
-		scheme = "http"
-	}
+	scheme := publicScheme(c)
 	body = bytes.ReplaceAll(body, []byte(h.config.HOST_DESTINATION), []byte(fmt.Sprintf("%s://%s", scheme, c.Request.Host)))
 
 	headers := resp.Header.Clone()
